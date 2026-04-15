@@ -29,6 +29,23 @@ st.markdown("""
     margin-top: 6px;
     line-height: 1.4;
 }
+.movie-cast {
+    font-size: 0.72rem;
+    color: #9aa0a6;
+    margin-top: 4px;
+    font-style: italic;
+}
+.movie-providers {
+    font-size: 0.72rem;
+    color: #6cf;
+    margin-top: 4px;
+}
+.trailer-link a {
+    font-size: 0.78rem;
+    color: #ff6464 !important;
+    text-decoration: none;
+    font-weight: 600;
+}
 .no-poster {
     background: #1e1e2e;
     height: 210px;
@@ -37,12 +54,6 @@ st.markdown("""
     justify-content: center;
     border-radius: 10px;
     font-size: 3rem;
-}
-.expanded-query {
-    font-size: 0.72rem;
-    color: #555;
-    font-style: italic;
-    margin-bottom: 8px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -57,12 +68,7 @@ def render_stars(rating: float) -> str:
 
 
 def expand_query(user_query: str) -> str:
-    """
-    Use Ollama to rewrite the user's query with richer keywords —
-    actor full names, likely movie titles, genres, themes — so that
-    ChromaDB can find semantically relevant results even when the
-    original query is vague or uses partial names.
-    """
+    """Use Ollama to enrich the search query with likely titles, actors, and keywords."""
     try:
         response = ollama.chat(
             model="gemma4:latest",
@@ -70,9 +76,9 @@ def expand_query(user_query: str) -> str:
                 "role": "user",
                 "content": (
                     f"A user is searching for movies or TV series with this query: \"{user_query}\"\n\n"
-                    "Expand it into a richer set of search keywords: include the likely movie or show titles, "
-                    "full actor/director names, genres, themes, and synonyms that would help find matching content.\n"
-                    "Return ONLY the expanded keywords as a single line. No explanation, no bullet points."
+                    "Expand it into a richer set of search keywords: include likely movie or show titles, "
+                    "full actor/director names, genres, themes, and synonyms.\n"
+                    "Return ONLY the expanded keywords as a single line. No explanation."
                 ),
             }],
             stream=False,
@@ -84,7 +90,7 @@ def expand_query(user_query: str) -> str:
 
 
 def show_movie_cards(results: list[dict]) -> None:
-    """Display a row of movie/series cards with poster, stars, metadata, and overview snippet."""
+    """Display a row of movie/series cards: poster, stars, cast, providers, trailer, overview."""
     if not results:
         return
     cols = st.columns(len(results))
@@ -101,10 +107,7 @@ def show_movie_cards(results: list[dict]) -> None:
                     use_container_width=True,
                 )
             else:
-                st.markdown(
-                    "<div class='no-poster'>🎬</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown("<div class='no-poster'>🎬</div>", unsafe_allow_html=True)
 
             badge = "🎬" if m.get("type") == "Movie" else "📺"
             st.markdown(
@@ -121,7 +124,40 @@ def show_movie_cards(results: list[dict]) -> None:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                f"<div class='movie-meta'>{m['genres']}</div>"
+                f"<div class='movie-meta'>{m['genres']}</div>",
+                unsafe_allow_html=True,
+            )
+
+            directors = m.get("directors", "")
+            cast = m.get("cast", "")
+            if directors:
+                st.markdown(
+                    f"<div class='movie-cast'>Dir: {directors}</div>",
+                    unsafe_allow_html=True,
+                )
+            if cast:
+                st.markdown(
+                    f"<div class='movie-cast'>★ {cast}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            providers = m.get("providers", "")
+            if providers:
+                st.markdown(
+                    f"<div class='movie-providers'>📡 {providers}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            trailer_key = m.get("trailer_key", "")
+            if trailer_key:
+                st.markdown(
+                    f"<div class='trailer-link'>"
+                    f"<a href='https://www.youtube.com/watch?v={trailer_key}' target='_blank'>"
+                    f"▶ Watch trailer</a></div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
                 f"<div class='movie-overview'>{overview}</div>",
                 unsafe_allow_html=True,
             )
@@ -141,6 +177,7 @@ USER QUESTION:
 INSTRUCTIONS:
 - Recommend 2-4 titles from the context that best match the request
 - For each, briefly explain why it fits and mention the title, year, type (Movie/TV), and rating
+- Reference the director and lead cast when relevant
 - Keep your tone conversational and enthusiastic
 - If asked for a specific number of recommendations, respect that"""
 
@@ -162,16 +199,15 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**Example questions:**")
-    st.caption("• Best sci-fi from the 90s")
-    st.caption("• Funny shows for a date night")
-    st.caption("• Thrillers with high ratings")
-    st.caption("• Animated films for the family")
-    st.caption("• Crime series like Breaking Bad")
-    st.caption("• Space movie with McConaughey")
+    st.caption("• Horror Movies from the 80s")
+    st.caption("• Scorsese crime films")
+    st.caption("• Shows available on Netflix")
+    st.caption("• Something like Breaking Bad")
+    st.caption("• Psychological thrillers with plot twists")
 
 
 # --- Main chat ---
-st.title("What are you in the mood for?")
+st.title("Write a question?")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -185,11 +221,9 @@ if prompt := st.chat_input("Describe what kind of movie or series you're looking
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Expand the query with Ollama before searching
     with st.spinner("Thinking…"):
         expanded = expand_query(prompt)
 
-    # Retrieve using the expanded query
     try:
         results = query_movies(expanded, n_results=5)
     except Exception as e:
@@ -200,17 +234,32 @@ if prompt := st.chat_input("Describe what kind of movie or series you're looking
         st.warning("No titles in DB. Run `uv run python ingest.py` first.")
         st.stop()
 
-    # Build RAG context from original results
     context_lines = []
     for r in results:
         m = r["metadata"]
         overview = r["document"].split("Overview:")[-1].strip()
+        extras = []
+        if m.get("directors"):
+            extras.append(f"Dir: {m['directors']}")
+        if m.get("cast"):
+            extras.append(f"Cast: {m['cast']}")
+        if m.get("providers"):
+            extras.append(f"On: {m['providers']}")
+        extras_line = " | ".join(extras)
         context_lines.append(
             f"- {m['title']} ({m['year']}) | {m.get('type', 'Movie')} | "
-            f"Genres: {m['genres']} | Rating: {m['rating']}/10\n  {overview}"
+            f"Genres: {m['genres']} | Rating: {m['rating']}/10"
+            + (f"\n  {extras_line}" if extras_line else "")
+            + f"\n  {overview}"
         )
     context = "\n".join(context_lines)
     rag_prompt = build_rag_prompt(prompt, context)
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": "",
+        "results": results,
+    })
 
     with st.chat_message("assistant"):
         show_movie_cards(results)
@@ -227,7 +276,9 @@ if prompt := st.chat_input("Describe what kind of movie or series you're looking
             for chunk in stream:
                 full_response += chunk["message"]["content"]
                 response_container.markdown(full_response + "▌")
+                st.session_state.messages[-1]["content"] = full_response
             response_container.markdown(full_response)
+            st.session_state.messages[-1]["content"] = full_response
         except ollama.ResponseError as e:
             st.error(
                 f"Ollama error: {e}\n\n"
@@ -235,9 +286,3 @@ if prompt := st.chat_input("Describe what kind of movie or series you're looking
                 "and the model is pulled (`ollama pull gemma4:latest`)."
             )
             st.stop()
-
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": full_response,
-        "results": results,
-    })
