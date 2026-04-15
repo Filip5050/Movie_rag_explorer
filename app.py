@@ -1,0 +1,243 @@
+import streamlit as st
+import ollama
+
+from vector import query_movies, get_collection
+
+st.set_page_config(page_title="Movie RAG Explorer", page_icon="🎬", layout="wide")
+
+st.markdown("""
+<style>
+.movie-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    margin: 6px 0 2px 0;
+    line-height: 1.3;
+}
+.movie-meta {
+    font-size: 0.75rem;
+    color: #888;
+    margin: 2px 0;
+}
+.star-row {
+    font-size: 0.95rem;
+    margin: 4px 0;
+    line-height: 1;
+}
+.movie-overview {
+    font-size: 0.75rem;
+    color: #bbb;
+    margin-top: 6px;
+    line-height: 1.4;
+}
+.no-poster {
+    background: #1e1e2e;
+    height: 210px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    font-size: 3rem;
+}
+.expanded-query {
+    font-size: 0.72rem;
+    color: #555;
+    font-style: italic;
+    margin-bottom: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+
+def render_stars(rating: float) -> str:
+    n = min(10, max(0, round(float(rating))))
+    return "★" * n + "☆" * (10 - n)
+
+
+def expand_query(user_query: str) -> str:
+    """
+    Use Ollama to rewrite the user's query with richer keywords —
+    actor full names, likely movie titles, genres, themes — so that
+    ChromaDB can find semantically relevant results even when the
+    original query is vague or uses partial names.
+    """
+    try:
+        response = ollama.chat(
+            model="gemma4:latest",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"A user is searching for movies or TV series with this query: \"{user_query}\"\n\n"
+                    "Expand it into a richer set of search keywords: include the likely movie or show titles, "
+                    "full actor/director names, genres, themes, and synonyms that would help find matching content.\n"
+                    "Return ONLY the expanded keywords as a single line. No explanation, no bullet points."
+                ),
+            }],
+            stream=False,
+        )
+        expanded = response["message"]["content"].strip()
+        return f"{user_query} {expanded}"
+    except Exception:
+        return user_query
+
+
+def show_movie_cards(results: list[dict]) -> None:
+    """Display a row of movie/series cards with poster, stars, metadata, and overview snippet."""
+    if not results:
+        return
+    cols = st.columns(len(results))
+    for col, r in zip(cols, results):
+        m = r["metadata"]
+        raw_overview = r["document"].split("Overview:")[-1].strip()
+        overview = raw_overview[:130] + "…" if len(raw_overview) > 130 else raw_overview
+
+        with col:
+            poster = m.get("poster_path", "")
+            if poster:
+                st.image(
+                    f"https://image.tmdb.org/t/p/w342{poster}",
+                    use_container_width=True,
+                )
+            else:
+                st.markdown(
+                    "<div class='no-poster'>🎬</div>",
+                    unsafe_allow_html=True,
+                )
+
+            badge = "🎬" if m.get("type") == "Movie" else "📺"
+            st.markdown(
+                f"<div class='movie-title'>{m['title']}</div>"
+                f"<div class='movie-meta'>{badge} {m.get('type', 'Movie')} · {m['year']}</div>",
+                unsafe_allow_html=True,
+            )
+            stars = render_stars(float(m["rating"]))
+            st.markdown(
+                f"<div class='star-row'>"
+                f"<span style='color:#FFD700'>{stars}</span>"
+                f"<span style='color:#888; font-size:0.8rem'> {m['rating']}/10</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='movie-meta'>{m['genres']}</div>"
+                f"<div class='movie-overview'>{overview}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def build_rag_prompt(user_query: str, context: str) -> str:
+    return f"""You are a knowledgeable movie and TV series recommendation assistant. Use ONLY the titles listed in the context below. Do not hallucinate or invent titles not in the context.
+
+If the context does not contain relevant titles, say so honestly and suggest the user try rephrasing.
+
+CONTEXT:
+{context}
+
+USER QUESTION:
+{user_query}
+
+INSTRUCTIONS:
+- Recommend 2-4 titles from the context that best match the request
+- For each, briefly explain why it fits and mention the title, year, type (Movie/TV), and rating
+- Keep your tone conversational and enthusiastic
+- If asked for a specific number of recommendations, respect that"""
+
+
+# --- Sidebar ---
+with st.sidebar:
+    st.title("🎬 Movie RAG Explorer")
+    st.caption("TMDB · ChromaDB · Ollama gemma4")
+    st.divider()
+
+    try:
+        col = get_collection()
+        count = col.count()
+        st.metric("Titles in DB", count)
+        if count == 0:
+            st.warning("DB is empty.\nRun: `uv run python ingest.py`")
+    except Exception:
+        st.error("DB not found.\nRun: `uv run python ingest.py`")
+
+    st.divider()
+    st.markdown("**Example questions:**")
+    st.caption("• Best sci-fi from the 90s")
+    st.caption("• Funny shows for a date night")
+    st.caption("• Thrillers with high ratings")
+    st.caption("• Animated films for the family")
+    st.caption("• Crime series like Breaking Bad")
+    st.caption("• Space movie with McConaughey")
+
+
+# --- Main chat ---
+st.title("What are you in the mood for?")
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        if message["role"] == "assistant" and message.get("results"):
+            show_movie_cards(message["results"])
+            st.divider()
+        st.markdown(message["content"])
+
+if prompt := st.chat_input("Describe what kind of movie or series you're looking for..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Expand the query with Ollama before searching
+    with st.spinner("Thinking…"):
+        expanded = expand_query(prompt)
+
+    # Retrieve using the expanded query
+    try:
+        results = query_movies(expanded, n_results=5)
+    except Exception as e:
+        st.error(f"Vector DB error: {e}\n\nRun `uv run python ingest.py` first.")
+        st.stop()
+
+    if not results:
+        st.warning("No titles in DB. Run `uv run python ingest.py` first.")
+        st.stop()
+
+    # Build RAG context from original results
+    context_lines = []
+    for r in results:
+        m = r["metadata"]
+        overview = r["document"].split("Overview:")[-1].strip()
+        context_lines.append(
+            f"- {m['title']} ({m['year']}) | {m.get('type', 'Movie')} | "
+            f"Genres: {m['genres']} | Rating: {m['rating']}/10\n  {overview}"
+        )
+    context = "\n".join(context_lines)
+    rag_prompt = build_rag_prompt(prompt, context)
+
+    with st.chat_message("assistant"):
+        show_movie_cards(results)
+        st.divider()
+
+        response_container = st.empty()
+        full_response = ""
+        try:
+            stream = ollama.chat(
+                model="gemma4:latest",
+                messages=[{"role": "user", "content": rag_prompt}],
+                stream=True,
+            )
+            for chunk in stream:
+                full_response += chunk["message"]["content"]
+                response_container.markdown(full_response + "▌")
+            response_container.markdown(full_response)
+        except ollama.ResponseError as e:
+            st.error(
+                f"Ollama error: {e}\n\n"
+                "Make sure Ollama is running (`ollama serve`) "
+                "and the model is pulled (`ollama pull gemma4:latest`)."
+            )
+            st.stop()
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": full_response,
+        "results": results,
+    })

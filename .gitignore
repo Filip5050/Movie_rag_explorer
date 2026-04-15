@@ -1,0 +1,19 @@
+# Environment
+.env
+
+# ChromaDB persisted data
+chroma_db/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# uv
+uv.lock
+
+# OS
+.DS_Store
+Thumbs.db
+    
