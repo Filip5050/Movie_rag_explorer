@@ -1,9 +1,9 @@
 import streamlit as st
 import ollama
 
-from vector import query_movies, get_collection
+from vector import query_movies
 
-st.set_page_config(page_title="Movie RAG Explorer", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Movie RAG Explorer", layout="wide")
 
 st.markdown("""
 <style>
@@ -29,6 +29,12 @@ st.markdown("""
     margin-top: 6px;
     line-height: 1.4;
 }
+.movie-tagline {
+    font-size: 0.72rem;
+    color: #aaa;
+    font-style: italic;
+    margin: 2px 0 4px 0;
+}
 .movie-cast {
     font-size: 0.72rem;
     color: #9aa0a6;
@@ -39,6 +45,11 @@ st.markdown("""
     font-size: 0.72rem;
     color: #6cf;
     margin-top: 4px;
+}
+.movie-providers-buy {
+    font-size: 0.72rem;
+    color: #fa0;
+    margin-top: 2px;
 }
 .trailer-link a {
     font-size: 0.78rem;
@@ -110,16 +121,26 @@ def show_movie_cards(results: list[dict]) -> None:
                 st.markdown("<div class='no-poster'>🎬</div>", unsafe_allow_html=True)
 
             badge = "🎬" if m.get("type") == "Movie" else "📺"
+            runtime = m.get("runtime", 0)
+            runtime_str = f" · {runtime}min" if runtime else ""
             st.markdown(
                 f"<div class='movie-title'>{m['title']}</div>"
-                f"<div class='movie-meta'>{badge} {m.get('type', 'Movie')} · {m['year']}</div>",
+                f"<div class='movie-meta'>{badge} {m.get('type', 'Movie')} · {m['year']}{runtime_str}</div>",
                 unsafe_allow_html=True,
             )
+
+            if m.get("tagline"):
+                st.markdown(
+                    f"<div class='movie-tagline'>\"{m['tagline']}\"</div>",
+                    unsafe_allow_html=True,
+                )
+
             stars = render_stars(float(m["rating"]))
             st.markdown(
                 f"<div class='star-row'>"
                 f"<span style='color:#FFD700'>{stars}</span>"
-                f"<span style='color:#888; font-size:0.8rem'> {m['rating']}/10</span>"
+                f"<span style='color:#888; font-size:0.8rem'> {m['rating']}/10"
+                f" ({m.get('vote_count', 0):,} votes)</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -128,11 +149,49 @@ def show_movie_cards(results: list[dict]) -> None:
                 unsafe_allow_html=True,
             )
 
+            # Status badge for non-standard states
+            status = m.get("status", "")
+            if status and status not in ("Released", "Ended", ""):
+                st.markdown(
+                    f"<div class='movie-meta' style='color:#f90'>⚠ {status}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Franchise / collection
+            if m.get("collection"):
+                st.markdown(
+                    f"<div class='movie-cast'>📚 {m['collection']}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # TV: networks + seasons
+            if m.get("type") == "TV Series":
+                networks = m.get("networks", "")
+                seasons = m.get("number_of_seasons", 0)
+                episodes = m.get("number_of_episodes", 0)
+                tv_parts = []
+                if networks:
+                    tv_parts.append(networks)
+                if seasons:
+                    ep_str = f" ({episodes} ep)" if episodes else ""
+                    tv_parts.append(f"{seasons} seasons{ep_str}")
+                if tv_parts:
+                    st.markdown(
+                        f"<div class='movie-cast'>📺 {' · '.join(tv_parts)}</div>",
+                        unsafe_allow_html=True,
+                    )
+
             directors = m.get("directors", "")
+            writers = m.get("writers", "")
             cast = m.get("cast", "")
             if directors:
                 st.markdown(
                     f"<div class='movie-cast'>Dir: {directors}</div>",
+                    unsafe_allow_html=True,
+                )
+            if writers:
+                st.markdown(
+                    f"<div class='movie-cast'>✍ {writers}</div>",
                     unsafe_allow_html=True,
                 )
             if cast:
@@ -145,6 +204,20 @@ def show_movie_cards(results: list[dict]) -> None:
             if providers:
                 st.markdown(
                     f"<div class='movie-providers'>📡 {providers}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            providers_rent = m.get("providers_rent", "")
+            if providers_rent and not providers:
+                st.markdown(
+                    f"<div class='movie-providers-buy'>🎞 Rent: {providers_rent}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            providers_buy = m.get("providers_buy", "")
+            if providers_buy and not providers:
+                st.markdown(
+                    f"<div class='movie-providers-buy'>🛒 Buy: {providers_buy}</div>",
                     unsafe_allow_html=True,
                 )
 
@@ -184,19 +257,8 @@ INSTRUCTIONS:
 
 # --- Sidebar ---
 with st.sidebar:
-    st.title("🎬 Movie RAG Explorer")
+    st.title("Movie RAG Explorer")
     st.caption("TMDB · ChromaDB · Ollama gemma4")
-    st.divider()
-
-    try:
-        col = get_collection()
-        count = col.count()
-        st.metric("Titles in DB", count)
-        if count == 0:
-            st.warning("DB is empty.\nRun: `uv run python ingest.py`")
-    except Exception:
-        st.error("DB not found.\nRun: `uv run python ingest.py`")
-
     st.divider()
     st.markdown("**Example questions:**")
     st.caption("• Horror Movies from the 80s")
@@ -238,17 +300,40 @@ if prompt := st.chat_input("Describe what kind of movie or series you're looking
     for r in results:
         m = r["metadata"]
         overview = r["document"].split("Overview:")[-1].strip()
+
+        runtime = m.get("runtime", 0)
+        runtime_str = f" · {runtime}min" if runtime else ""
+
         extras = []
         if m.get("directors"):
             extras.append(f"Dir: {m['directors']}")
+        if m.get("writers"):
+            extras.append(f"Writer: {m['writers']}")
         if m.get("cast"):
             extras.append(f"Cast: {m['cast']}")
+        if m.get("collection"):
+            extras.append(f"Franchise: {m['collection']}")
+        if m.get("networks"):
+            extras.append(f"Network: {m['networks']}")
+        seasons = m.get("number_of_seasons", 0)
+        episodes = m.get("number_of_episodes", 0)
+        if seasons:
+            ep_str = f" ({episodes} ep)" if episodes else ""
+            extras.append(f"Seasons: {seasons}{ep_str}")
+        status = m.get("status", "")
+        if status and status not in ("Released", "Ended", ""):
+            extras.append(f"Status: {status}")
         if m.get("providers"):
-            extras.append(f"On: {m['providers']}")
+            extras.append(f"Streaming: {m['providers']}")
+        elif m.get("providers_rent"):
+            extras.append(f"Rent: {m['providers_rent']}")
+        if m.get("production_companies"):
+            extras.append(f"Studio: {m['production_companies']}")
+
         extras_line = " | ".join(extras)
         context_lines.append(
             f"- {m['title']} ({m['year']}) | {m.get('type', 'Movie')} | "
-            f"Genres: {m['genres']} | Rating: {m['rating']}/10"
+            f"Genres: {m['genres']} | Rating: {m['rating']}/10{runtime_str}"
             + (f"\n  {extras_line}" if extras_line else "")
             + f"\n  {overview}"
         )
